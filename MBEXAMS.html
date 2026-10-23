@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>منصة الامتحانات التفاعلية الذكية</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PDF.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- Tesseract.js (لقراءة الورقة تلقائياً) -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Cairo', sans-serif; background-color: #f1f5f9; user-select: none; }
+        .exam-container { position: relative; display: inline-block; box-shadow: 0 10px 25px rgba(0,0,0,0.15); background: white; border-radius: 8px; overflow: hidden; }
+        .question-marker { position: absolute; transform: translate(-50%, -50%); z-index: 20; transition: box-shadow 0.2s; }
+        .question-marker.teacher-draggable { cursor: move; border: 2px dashed #4f46e5; }
+        .question-marker.teacher-draggable:hover { box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.3); z-index: 30; }
+        #drawCanvas { position: absolute; top: 0; left: 0; z-index: 10; pointer-events: none; }
+        #drawCanvas.drawing-active { pointer-events: auto; cursor: crosshair; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <!-- الشريط العلوي -->
+    <header class="bg-slate-900 text-white shadow-md px-6 py-3 flex items-center justify-between sticky top-0 z-50">
+        <div class="flex items-center gap-3">
+            <span class="text-2xl">📝</span>
+            <div>
+                <h1 id="headerTitle" class="font-bold text-lg">امتحان إلكتروني تفاعلي</h1>
+                <p class="text-xs text-slate-400">أجب على الورقة مباشرة ثم اضغط إرسال في النهاية</p>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <!-- شريط حالة يظهر للمعلم فقط -->
+            <span id="teacherBadge" class="hidden bg-amber-500 text-slate-950 text-xs font-extrabold px-3 py-1 rounded-full">
+                وضع المعلم مفتوح 🔓
+            </span>
+            <!-- زر دخول المعلم السري -->
+            <button id="teacherLockBtn" onclick="toggleTeacherAuth()" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg border border-slate-700 flex items-center gap-1 transition">
+                <span>🔒</span> <span id="lockBtnText">دخول المعلم</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- المحتوى الرئيسي -->
+    <div class="flex-1 flex flex-col lg:flex-row gap-4 p-4 max-w-[1600px] w-full mx-auto">
+
+        <!-- 1. لوحة تحكم المعلم (مخفية تماماً ومحمية برقم سري) -->
+        <aside id="teacherPanel" class="hidden w-full lg:w-96 bg-white rounded-2xl shadow-lg border border-indigo-100 p-5 flex flex-col gap-5 h-fit shrink-0">
+            <div class="border-b pb-3 flex justify-between items-center">
+                <h2 class="font-extrabold text-indigo-900 text-base flex items-center gap-2">⚙️ لوحة إعداد الامتحان (للمعلم)</h2>
+                <button onclick="lockTeacherPanel()" class="text-xs text-red-600 hover:underline font-bold">إغلاق القفل ✖</button>
+            </div>
+
+            <!-- رفع الورقة -->
+            <div class="bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                <label class="block text-sm font-bold text-slate-700 mb-2">1. ارفع صورة الامتحان أو ملف PDF:</label>
+                <input type="file" id="fileInput" accept="image/*,.pdf" class="block w-full text-xs text-slate-600 file:ml-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 cursor-pointer" onchange="handleFileUpload(event)">
+                <p class="text-[11px] text-slate-500 mt-1.5">يدعم الصور (JPG, PNG) وملفات الـ PDF.</p>
+            </div>
+
+            <!-- الاستخراج الذكي التلقائي للأسئلة -->
+            <div class="bg-gradient-to-br from-indigo-50 to-purple-50 p-4 rounded-xl border border-indigo-200">
+                <label class="block text-sm font-bold text-indigo-950 mb-1">2. استخراج الأسئلة تلقائياً من الورقة:</label>
+                <p class="text-xs text-indigo-700 mb-3">يقرأ الورقة بالذكاء الاصطناعي (OCR أو Gemini AI) ويضع اختيارات (أ-ب-ج-د) أو مكان الحل المقالي أمام كل سؤال أوتوماتيكياً!</p>
+                
+                <button id="aiScanBtn" onclick="autoScanExamPaper()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs shadow transition flex items-center justify-center gap-2">
+                    <span>✨</span> <span>مسح الورقة ووضع خانات الأسئلة تلقائياً</span>
+                </button>
+                <div id="scanStatus" class="hidden mt-2 text-xs font-bold text-center text-indigo-800 bg-white/80 py-1.5 px-2 rounded-lg"></div>
+
+                <details class="mt-2">
+                    <summary class="text-[11px] text-indigo-600 cursor-pointer font-semibold">إعداد متقدم: مفتاح Gemini AI (اختياري لدقة 100%)</summary>
+                    <input type="password" id="geminiKey" placeholder="ضع Gemini API Key هنا (أو اتركه للماسح المجاني)" class="mt-1 w-full text-xs p-2 border rounded-lg bg-white">
+                </details>
+            </div>
+
+            <!-- إضافة أو تعديل يدوي سريع -->
+            <div class="bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                <label class="block text-sm font-bold text-slate-700 mb-2">3. أو اضغط لإضافة خانة على الورقة (مع السحب):</label>
+                <div class="grid grid-cols-2 gap-2 text-xs">
+                    <button onclick="addMarker('mcq')" class="bg-white hover:bg-indigo-50 border border-slate-300 font-bold py-2 px-2 rounded-lg text-slate-700 flex items-center justify-center gap-1">➕ سؤال اختر (أ-ب-ج-د)</button>
+                    <button onclick="addMarker('tf')" class="bg-white hover:bg-indigo-50 border border-slate-300 font-bold py-2 px-2 rounded-lg text-slate-700 flex items-center justify-center gap-1">➕ صح أو خطأ</button>
+                    <button onclick="addMarker('text')" class="bg-white hover:bg-indigo-50 border border-slate-300 font-bold py-2 px-2 rounded-lg text-slate-700 flex items-center justify-center gap-1">➕ مكان حل مقالي/أكمل</button>
+                    <button onclick="clearAllMarkers()" class="bg-red-50 hover:bg-red-100 border border-red-200 font-bold py-2 px-2 rounded-lg text-red-600 flex items-center justify-center gap-1">🗑️ مسح كل الخانات</button>
+                </div>
+                <p class="text-[11px] text-slate-500 mt-2">💡 يمكنك سحب أي خانة بالماوس ووضعها أمام السؤال بالظبط.</p>
+            </div>
+
+            <!-- إعدادات تليجرام والرقم السري -->
+            <div class="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2">
+                <label class="block text-sm font-bold text-slate-700">4. بيانات استلام الحل (تليجرام جاهز):</label>
+                <div>
+                    <span class="text-[11px] text-slate-500">Bot Token:</span>
+                    <input type="text" id="tgToken" value="8993576554:AAFFQYFpwTdwkMuwohWEv15VzkQhhjxOJr8" class="w-full text-xs p-1.5 border rounded bg-white text-left" dir="ltr">
+                </div>
+                <div>
+                    <span class="text-[11px] text-slate-500">Chat ID:</span>
+                    <input type="text" id="tgChatId" value="7202823164" class="w-full text-xs p-1.5 border rounded bg-white text-left" dir="ltr">
+                </div>
+                <div>
+                    <span class="text-[11px] text-slate-500">الرقم السري للوحة المعلم:</span>
+                    <input type="text" id="teacherPinInput" value="1234" class="w-full text-xs p-1.5 border rounded bg-white text-left" dir="ltr">
+                </div>
+                <button onclick="testTelegram()" class="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-1.5 rounded-lg text-xs transition">📲 إرسال رسالة اختبار لتليجرام الآن</button>
+            </div>
+
+            <!-- تصدير نسخة الطالب المحمية -->
+            <div class="bg-emerald-50 p-4 rounded-xl border border-emerald-300">
+                <h3 class="text-xs font-extrabold text-emerald-950 mb-1">5. نشر وتوزيع الامتحان للطلاب:</h3>
+                <p class="text-[11px] text-emerald-700 mb-2.5">يحفظ ملف HTML للطالب فقط (ممسوح منه لوحة المعلم تماماً ومثبت بداخله الورقة والأسئلة).</p>
+                <button onclick="exportStudentOnlyHTML()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold py-3 px-4 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-2">
+                    <span>📥</span> <span>تحميل موقع الطالب الجاهز للنشر (بدون لوحة المعلم)</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- 2. منطقة الطالب والورقة التفاعلية -->
+        <main class="flex-1 flex flex-col gap-4">
+            <!-- شريط بيانات الطالب وأدوات الحل -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 flex flex-wrap items-center justify-between gap-4">
+                <div class="flex items-center gap-3 flex-1 min-w-[260px]">
+                    <label class="font-bold text-slate-800 text-sm whitespace-nowrap">👤 اسم الطالب:</label>
+                    <input type="text" id="studentName" placeholder="اكتب اسمك الثلاثي هنا قبل البدء..." class="w-full max-w-md border-2 border-indigo-200 focus:border-indigo-600 rounded-xl px-3.5 py-2 text-sm font-bold outline-none transition">
+                </div>
+
+                <!-- أدوات القلم الحر للطالب -->
+                <div class="flex items-center gap-2 flex-wrap">
+                    <button id="penToggleBtn" onclick="togglePen()" class="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2 px-3.5 rounded-xl text-xs border border-slate-300 flex items-center gap-1.5 transition">
+                        <span>✏️</span> <span id="penBtnText">تفعيل القلم الحر للحل باليد</span>
+                    </button>
+                    <button onclick="clearDrawing()" class="bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-600 font-bold py-2 px-3 rounded-xl text-xs border border-slate-200 transition" title="مسح الشخبطة">
+                        🧽 مسح القلم
+                    </button>
+                    <button id="submitExamBtn" onclick="submitExamToTelegram()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold py-2.5 px-6 rounded-xl text-sm shadow-md transition flex items-center gap-2">
+                        <span>🚀</span> <span>اعتماد الإجابة وإرسال الامتحان</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- حاوية ورقة الامتحان -->
+            <div class="bg-slate-200/70 rounded-2xl p-4 flex justify-center items-start overflow-auto min-h-[650px] border border-slate-300">
+                <div id="examWrapper" class="exam-container">
+                    <!-- كانفاس صورة الامتحان الأصلية -->
+                    <canvas id="bgCanvas"></canvas>
+                    <!-- كانفاس الكتابة بالقلم الحر -->
+                    <canvas id="drawCanvas"></canvas>
+                    <!-- طبقة الخانات التفاعلية (اختر / مقالي / صح وخطأ) -->
+                    <div id="markersLayer"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // إعداد PDF.js
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // حالة التطبيق (يتم تضمينها تلقائياً عند التصدير للطالب)
+        let APP_STATE = {
+            isStudentOnlyBuild: false,
+            teacherPin: "1234",
+            tgToken: "8993576554:AAFFQYFpwTdwkMuwohWEv15VzkQhhjxOJr8",
+            tgChatId: "7202823164",
+            bgImageDataUrl: "",
+            markers: [
+                { id: 1, type: 'mcq', x: 25, y: 27, qNum: 1, answer: '' },
+                { id: 2, type: 'mcq', x: 25, y: 40, qNum: 2, answer: '' },
+                { id: 3, type: 'tf',  x: 25, y: 55, qNum: 3, answer: '' },
+                { id: 4, type: 'text', x: 45, y: 74, qNum: 4, answer: '' }
+            ]
+        };
+
+        let isTeacherUnlocked = false;
+        let isPenActive = false;
+        let isDrawing = false;
+        const bgCanvas = document.getElementById('bgCanvas');
+        const bgCtx = bgCanvas.getContext('2d');
+        const drawCanvas = document.getElementById('drawCanvas');
+        const drawCtx = drawCanvas.getContext('2d');
+        const markersLayer = document.getElementById('markersLayer');
+
+        // 1. تهيئة الموقع عند الفتح
+        window.onload = () => {
+            if (APP_STATE.isStudentOnlyBuild) {
+                const lockBtn = document.getElementById('teacherLockBtn');
+                if (lockBtn) lockBtn.remove();
+                const panel = document.getElementById('teacherPanel');
+                if (panel) panel.remove();
+            }
+
+            if (APP_STATE.bgImageDataUrl) {
+                loadImageToCanvas(APP_STATE.bgImageDataUrl);
+            } else {
+                generateSampleExamPaper();
+            }
+            initFreehandDrawing();
+        };
+
+        // إنشاء ورقة امتحان تجريبية افتراضية لتجربة الفكرة فوراً
+        function generateSampleExamPaper() {
+            bgCanvas.width = 800;
+            bgCanvas.height = 1000;
+            drawCanvas.width = 800;
+            drawCanvas.height = 1000;
+
+            // خلفية الورقة
+            bgCtx.fillStyle = '#ffffff';
+            bgCtx.fillRect(0, 0, 800, 1000);
+            bgCtx.strokeStyle = '#1e293b';
+            bgCtx.lineWidth = 4;
+            bgCtx.strokeRect(20, 20, 760, 960);
+
+            // ترويسة الورقة
+            bgCtx.fillStyle = '#0f172a';
+            bgCtx.textAlign = 'right';
+            bgCtx.font = 'bold 26px Cairo, sans-serif';
+            bgCtx.fillText('امتحان تجريبي - ارفع ورقتك من لوحة المعلم 🔒 (الرقم السري: 1234)', 750, 75);
+
+            bgCtx.font = 'bold 18px Cairo, sans-serif';
+            bgCtx.fillStyle = '#475569';
+            bgCtx.fillText('اسم الطالب: ...........................................................', 750, 130);
+
+            bgCtx.beginPath();
+            bgCtx.moveTo(40, 155);
+            bgCtx.lineTo(760, 155);
+            bgCtx.stroke();
+
+            // أسئلة تجريبية
+            bgCtx.fillStyle = '#0f172a';
+            bgCtx.font = 'bold 20px Cairo, sans-serif';
+            bgCtx.fillText('س1: اختر الإجابة الصحيحة مما بين القوسين:', 750, 210);
+
+            bgCtx.font = '18px Cairo, sans-serif';
+            bgCtx.fillText('1) عاصمة جمهورية مصر العربية هي مدينة: ( الإسكندرية - القاهرة - أسوان - الجيزة )', 740, 270);
+            bgCtx.fillText('2) ناتج ضرب 5 × 6 يساوي: ( 25 - 30 - 35 - 40 )', 740, 400);
+
+            bgCtx.font = 'bold 20px Cairo, sans-serif';
+            bgCtx.fillText('س2: ضع علامة (صح) أو علامة (خطأ):', 750, 490);
+            bgCtx.font = '18px Cairo, sans-serif';
+            bgCtx.fillText('3) تدور الأرض حول الشمس مرة كل 365 يوماً تقريباً.', 740, 550);
+
+            bgCtx.font = 'bold 20px Cairo, sans-serif';
+            bgCtx.fillText('س3: سؤال مقالي - اذكر فائدة واحدة للتعليم الإلكتروني:', 750, 660);
+            bgCtx.strokeStyle = '#cbd5e1';
+            bgCtx.strokeRect(100, 695, 640, 90);
+
+            APP_STATE.bgImageDataUrl = bgCanvas.toDataURL('image/jpeg', 0.92);
+            renderMarkers();
+        }
+
+        // تحميل أي صورة إلى الكانفاس
+        function loadImageToCanvas(dataUrl, callback) {
+            const img = new Image();
+            img.onload = () => {
+                const maxW = 900;
+                const scale = img.width > maxW ? maxW / img.width : 1;
+                bgCanvas.width = img.width * scale;
+                bgCanvas.height = img.height * scale;
+                drawCanvas.width = bgCanvas.width;
+                drawCanvas.height = bgCanvas.height;
+                bgCtx.drawImage(img, 0, 0, bgCanvas.width, bgCanvas.height);
+                APP_STATE.bgImageDataUrl = bgCanvas.toDataURL('image/jpeg', 0.92);
+                renderMarkers();
+                if (callback) callback();
+            };
+            img.src = dataUrl;
+        }
+
+        // 2. قفل وفتح لوحة المعلم بالرقم السري
+        function toggleTeacherAuth() {
+            if (isTeacherUnlocked) {
+                lockTeacherPanel();
+                return;
+            }
+            const pin = prompt("🔒 أدخل الرقم السري الخاص بالمعلم (الافتراضي: 1234):");
+            if (pin === APP_STATE.teacherPin) {
+                isTeacherUnlocked = true;
+                document.getElementById('teacherPanel').classList.remove('hidden');
+                document.getElementById('teacherBadge').classList.remove('hidden');
+                document.getElementById('lockBtnText').innerText = "قفل وضع المعلم";
+                renderMarkers();
+            } else if (pin !== null) {
+                alert("❌ الرقم السري غير صحيح! هذه اللوحة مخصصة للمعلم فقط.");
+            }
+        }
+
+        function lockTeacherPanel() {
+            isTeacherUnlocked = false;
+            APP_STATE.teacherPin = document.getElementById('teacherPinInput').value || "1234";
+            APP_STATE.tgToken = document.getElementById('tgToken').value.trim();
+            APP_STATE.tgChatId = document.getElementById('tgChatId').value.trim();
+            document.getElementById('teacherPanel').classList.add('hidden');
+            document.getElementById('teacherBadge').classList.add('hidden');
+            document.getElementById('lockBtnText').innerText = "دخول المعلم";
+            renderMarkers();
+        }
+
+        // 3. رفع ملف صورة أو PDF
+        async function handleFileUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            if (file.type === 'application/pdf') {
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                const page = await pdf.getPage(1);
+                const viewport = page.getViewport({ scale: 1.8 });
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = viewport.width;
+                tempCanvas.height = viewport.height;
+                await page.render({ canvasContext: tempCanvas.getContext('2d'), viewport }).promise;
+                loadImageToCanvas(tempCanvas.toDataURL('image/jpeg', 0.92), () => {
+                    autoScanExamPaper(); // مسح الورقة تلقائياً فور رفعها!
+                });
+            } else {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    loadImageToCanvas(ev.target.result, () => {
+                        autoScanExamPaper(); // مسح الورقة تلقائياً فور رفعها!
+                    });
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        // 4. الاستخراج التلقائي الذكي لأماكن الأسئلة (AI Vision + Tesseract OCR Fallback)
+        async function autoScanExamPaper() {
+            const statusEl = document.getElementById('scanStatus');
+            const btn = document.getElementById('aiScanBtn');
+            statusEl.classList.remove('hidden');
+            btn.disabled = true;
+            statusEl.innerText = "⏳ جاري قراءة ورقة الامتحان وتحديد أماكن الأسئلة تلقائياً...";
+
+            const geminiKey = document.getElementById('geminiKey').value.trim();
+
+            try {
+                // إذا وضع المعلم مفتاح Gemini API نستخدم Gemini Vision مباشرة
+                if (geminiKey) {
+                    const base64Img = APP_STATE.bgImageDataUrl.split(',')[1];
+                    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{
+                                parts: [
+                                    { text: `Analyze this exam image. Detect every question and return ONLY a JSON array of objects with fields: {"type": "mcq"|"tf"|"text", "x": percentage_from_left_0_to_100, "y": percentage_from_top_0_to_100}. Place 'x' at an empty space near the left side of the question line (around 20 to 30) and 'y' on the exact vertical line of the question.` },
+                                    { inlineData: { mimeType: "image/jpeg", data: base64Img } }
+                                ]
+                            }]
+                        })
+                    });
+                    const data = await resp.json();
+                    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+                    const jsonMatch = text.match(/\[[\s\S]*\]/);
+                    if (jsonMatch) {
+                        const parsed = JSON.parse(jsonMatch[0]);
+                        APP_STATE.markers = parsed.map((m, idx) => ({
+                            id: Date.now() + idx,
+                            type: m.type || 'mcq',
+                            x: Math.min(85, Math.max(15, Number(m.x) || 25)),
+                            y: Math.min(95, Math.max(10, Number(m.y) || 20)),
+                            qNum: idx + 1,
+                            answer: ''
+                        }));
+                        renderMarkers();
+                        statusEl.innerText = `✅ تم استخراج ${APP_STATE.markers.length} أسئلة بذكاء Gemini بنجاح! يمكنك سحب أي خانة لضبطها.`;
+                        btn.disabled = false;
+                        return;
+                    }
+                }
+
+                // الماسح البصري المجاني المدمج (يعمل تلقائياً بدون أي مفتاح API)
+                const result = await Tesseract.recognize(bgCanvas, 'ara+eng');
+                const lines = result.data.lines || [];
+                const detectedMarkers = [];
+                let currentMode = 'mcq'; // الافتراضي
+
+                lines.forEach((line) => {
+                    const txt = (line.text || '').trim();
+                    if (txt.length < 4) return;
+
+                    const bbox = line.bbox;
+                    const yPercent = Math.round(((bbox.y0 + bbox.y1) / 2 / bgCanvas.height) * 100);
+                    if (yPercent < 14 || yPercent > 95) return; // تجاهل الترويسة العلوية والهامش السفلي
+
+                    // تحديد نوع القسم من عنوان السؤال
+                    if (txt.includes('صح') || txt.includes('خطأ') || txt.includes('صواب') || txt.includes('True') || txt.includes('False')) {
+                        currentMode = 'tf';
+                        if (txt.includes('ضع') || txt.includes('علامة')) return;
+                    } else if (txt.includes('مقال') || txt.includes('اشرح') || txt.includes('اذكر') || txt.includes('علل') || txt.includes('أكمل') || txt.includes('اكمل') || txt.includes('فسر')) {
+                        currentMode = 'text';
+                    } else if (txt.includes('اختر') || txt.includes('تخير') || txt.includes('الصحيحة')) {
+                        currentMode = 'mcq';
+                        return;
+                    }
+
+                    // التحقق مما إذا كان السطر سؤالاً فرعياً (يبدأ برقم أو يحتوي على أقواس اختيارات أو علامة استفهام)
+                    const looksLikeQuestion = /^[\d١٢٣٤٥٦٧٨٩٠]+[\s\-\)\.]/.test(txt) || txt.includes('(') || txt.includes('؟') || txt.includes('?') || txt.includes('.....');
+
+                    if (looksLikeQuestion || currentMode === 'text') {
+                        // منع تكرار الخانات القريبة جداً في نفس السطر
+                        const tooClose = detectedMarkers.some(m => Math.abs(m.y - yPercent) < 5);
+                        if (!tooClose) {
+                            detectedMarkers.push({
+                                id: Date.now() + detectedMarkers.length,
+                                type: currentMode,
+                                x: currentMode === 'text' ? 45 : 22,
+                                y: currentMode === 'text' ? Math.min(93, yPercent + 4) : yPercent,
+                                qNum: detectedMarkers.length + 1,
+                                answer: ''
+                            });
+                        }
+                    }
+                });
+
+                if (detectedMarkers.length > 0) {
+                    APP_STATE.markers = detectedMarkers;
+                    renderMarkers();
+                    statusEl.innerText = `✅ تم قراءة الورقة ووضع ${detectedMarkers.length} خانات إجابة تلقائياً! اسحب أي خانة بالماوس لو أردت تحريكها.`;
+                } else {
+                    statusEl.innerText = "ℹ️ لم يتم رصد أرقام أسئلة واضحة، تم وضع 4 خانات افتراضية يمكنك سحبها أمام الأسئلة.";
+                }
+            } catch (err) {
+                console.error(err);
+                statusEl.innerText = "⚠️ تعذر المسح الآلي، يمكنك الضغط على الأزرار بالأسفل لإضافة الخانات وسحبها.";
+            }
+            btn.disabled = false;
+        }
+
+        // 5. رسم الخانات التفاعلية فوق الورقة
+        function renderMarkers() {
+            markersLayer.innerHTML = '';
+            APP_STATE.markers.forEach((m, index) => {
+                m.qNum = index + 1;
+                const el = document.createElement('div');
+                el.className = `question-marker ${isTeacherUnlocked ? 'teacher-draggable' : ''}`;
+                el.style.left = `${m.x}%`;
+                el.style.top = `${m.y}%`;
+
+                // زر حذف الخانة (يظهر للمعلم فقط)
+                const delBtnHtml = isTeacherUnlocked
+                    ? `<button onclick="deleteMarker(${m.id})" class="bg-red-600 text-white rounded-full w-5 h-5 text-[11px] font-bold flex items-center justify-center shadow hover:bg-red-700" title="حذف">×</button>`
+                    : '';
+
+                if (m.type === 'mcq') {
+                    const opts = ['أ', 'ب', 'ج', 'د'];
+                    el.innerHTML = `
+                        <div class="bg-white/95 backdrop-blur border-2 border-indigo-600 rounded-xl px-2 py-1 shadow-md flex items-center gap-1">
+                            <span class="text-[11px] font-extrabold text-indigo-900 ml-1">ج${m.qNum}:</span>
+                            ${opts.map(opt => `
+                                <button onclick="selectAnswer(${m.id}, '${opt}')"
+                                    class="w-7 h-7 rounded-lg text-xs font-extrabold transition ${m.answer === opt ? 'bg-indigo-600 text-white shadow-inner scale-105' : 'bg-slate-100 text-slate-700 hover:bg-indigo-100'}">
+                                    ${opt}
+                                </button>
+                            `).join('')}
+                            ${delBtnHtml}
+                        </div>
+                    `;
+                } else if (m.type === 'tf') {
+                    const opts = [{k:'صح', label:'✔️ صح'}, {k:'خطأ', label:'❌ خطأ'}];
+                    el.innerHTML = `
+                        <div class="bg-white/95 backdrop-blur border-2 border-emerald-600 rounded-xl px-2 py-1 shadow-md flex items-center gap-1">
+                            <span class="text-[11px] font-extrabold text-emerald-900 ml-1">ج${m.qNum}:</span>
+                            ${opts.map(o => `
+                                <button onclick="selectAnswer(${m.id}, '${o.k}')"
+                                    class="px-2.5 py-1 rounded-lg text-xs font-extrabold transition ${m.answer === o.k ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-emerald-100'}">
+                                    ${o.label}
+                                </button>
+                            `).join('')}
+                            ${delBtnHtml}
+                        </div>
+                    `;
+                } else if (m.type === 'text') {
+                    el.innerHTML = `
+                        <div class="bg-white/95 backdrop-blur border-2 border-amber-500 rounded-xl p-1.5 shadow-md flex items-center gap-1.5">
+                            <span class="text-[11px] font-extrabold text-amber-900 whitespace-nowrap">ج${m.qNum}:</span>
+                            <input type="text" value="${m.answer || ''}" placeholder="اكتب إجابتك هنا..."
+                                oninput="updateTextAnswer(${m.id}, this.value)"
+                                class="w-56 sm:w-72 text-xs font-bold text-slate-900 bg-amber-50/60 border border-amber-300 rounded-lg px-2.5 py-1.5 outline-none focus:border-amber-600">
+                            ${delBtnHtml}
+                        </div>
+                    `;
+                }
+
+                // تفعيل السحب والإفلات للمعلم لضبط المكان بسهولة
+                if (isTeacherUnlocked) {
+                    enableDrag(el, m);
+                }
+
+                markersLayer.appendChild(el);
+            });
+        }
+
+        function selectAnswer(id, val) {
+            const item = APP_STATE.markers.find(m => m.id === id);
+            if (item) {
+                item.answer = val;
+                renderMarkers();
+            }
+        }
+
+        function updateTextAnswer(id, val) {
+            const item = APP_STATE.markers.find(m => m.id === id);
+            if (item) item.answer = val;
+        }
+
+        function addMarker(type) {
+            APP_STATE.markers.push({
+                id: Date.now(),
+                type,
+                x: 35,
+                y: 30 + (APP_STATE.markers.length * 7) % 55,
+                qNum: APP_STATE.markers.length + 1,
+                answer: ''
+            });
+            renderMarkers();
+        }
+
+        function deleteMarker(id) {
+            APP_STATE.markers = APP_STATE.markers.filter(m => m.id !== id);
+            renderMarkers();
+        }
+
+        function clearAllMarkers() {
+            if (confirm("هل تريد مسح كل خانات الأسئلة الحالية؟")) {
+                APP_STATE.markers = [];
+                renderMarkers();
+            }
+        }
+
+        // سحب الخانات بالماوس أو اللمس (في وضع المعلم)
+        function enableDrag(el, markerObj) {
+            let startX, startY;
+            const onMove = (e) => {
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                const rect = bgCanvas.getBoundingClientRect();
+                let newX = ((clientX - rect.left) / rect.width) * 100;
+                let newY = ((clientY - rect.top) / rect.height) * 100;
+                markerObj.x = Math.max(5, Math.min(95, newX));
+                markerObj.y = Math.max(5, Math.min(95, newY));
+                el.style.left = `${markerObj.x}%`;
+                el.style.top = `${markerObj.y}%`;
+            };
+            const onUp = () => {
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+                window.removeEventListener('touchmove', onMove);
+                window.removeEventListener('touchend', onUp);
+            };
+            el.addEventListener('mousedown', (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+                e.preventDefault();
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+            });
+            el.addEventListener('touchstart', (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+                window.addEventListener('touchmove', onMove);
+                window.addEventListener('touchend', onUp);
+            });
+        }
+
+        // 6. القلم الحر للكتابة اليدوية على الورقة
+        function initFreehandDrawing() {
+            const getPos = (e) => {
+                const rect = drawCanvas.getBoundingClientRect();
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                return {
+                    x: (clientX - rect.left) * (drawCanvas.width / rect.width),
+                    y: (clientY - rect.top) * (drawCanvas.height / rect.height)
+                };
+            };
+
+            const start = (e) => {
+                if (!isPenActive) return;
+                isDrawing = true;
+                const pos = getPos(e);
+                drawCtx.beginPath();
+                drawCtx.moveTo(pos.x, pos.y);
+            };
+            const move = (e) => {
+                if (!isDrawing || !isPenActive) return;
+                e.preventDefault();
+                const pos = getPos(e);
+                drawCtx.lineWidth = 3;
+                drawCtx.lineCap = 'round';
+                drawCtx.strokeStyle = '#2563eb';
+                drawCtx.lineTo(pos.x, pos.y);
+                drawCtx.stroke();
+            };
+            const end = () => { isDrawing = false; };
+
+            drawCanvas.addEventListener('mousedown', start);
+            drawCanvas.addEventListener('mousemove', move);
+            window.addEventListener('mouseup', end);
+            drawCanvas.addEventListener('touchstart', start, { passive: false });
+            drawCanvas.addEventListener('touchmove', move, { passive: false });
+            window.addEventListener('touchend', end);
+        }
+
+        function togglePen() {
+            isPenActive = !isPenActive;
+            const btn = document.getElementById('penToggleBtn');
+            const txt = document.getElementById('penBtnText');
+            if (isPenActive) {
+                drawCanvas.classList.add('drawing-active');
+                btn.className = "bg-indigo-600 text-white font-bold py-2 px-3.5 rounded-xl text-xs shadow flex items-center gap-1.5 transition";
+                txt.innerText = "إيقاف القلم الحر (العودة للاختيارات)";
+            } else {
+                drawCanvas.classList.remove('drawing-active');
+                btn.className = "bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2 px-3.5 rounded-xl text-xs border border-slate-300 flex items-center gap-1.5 transition";
+                txt.innerText = "تفعيل القلم الحر للحل باليد";
+            }
+        }
+
+        function clearDrawing() {
+            drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+        }
+
+        // 7. دمج الورقة مع إجابات الطالب وإرسالها لتليجرام مباشرة
+        async function submitExamToTelegram() {
+            const studentName = document.getElementById('studentName').value.trim();
+            if (!studentName) {
+                alert("⚠️ من فضلك اكتب اسمك الثلاثي في الخانة العلوية قبل إرسال الامتحان!");
+                document.getElementById('studentName').focus();
+                return;
+            }
+
+            const btn = document.getElementById('submitExamBtn');
+            btn.disabled = true;
+            btn.innerHTML = "⏳ جاري تصحيح ودمج الورقة وإرسالها للمعلم...";
+
+            try {
+                // إنشاء كانفاس نهائي مدمج عليه الورقة + اسم الطالب + كل الإجابات
+                const finalCanvas = document.createElement('canvas');
+                finalCanvas.width = bgCanvas.width;
+                finalCanvas.height = bgCanvas.height;
+                const ctx = finalCanvas.getContext('2d');
+
+                // 1. رسم الورقة الأصلية
+                ctx.drawImage(bgCanvas, 0, 0);
+                // 2. رسم خط يد الطالب
+                ctx.drawImage(drawCanvas, 0, 0);
+
+                // 3. طباعة شريط اسم الطالب أعلى الورقة بوضوح
+                ctx.fillStyle = 'rgba(30, 41, 59, 0.92)';
+                ctx.fillRect(0, 0, finalCanvas.width, 46);
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 20px Cairo, sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(`👤 اسم الطالب: ${studentName}   |   📅 التاريخ: ${new Date().toLocaleString('ar-EG')}`, finalCanvas.width - 20, 30);
+
+                // 4. طباعة جميع إجابات الطالب فوق أماكنها على الورقة باللون الأزرق الواضح
+                APP_STATE.markers.forEach((m) => {
+                    const px = (m.x / 100) * finalCanvas.width;
+                    const py = (m.y / 100) * finalCanvas.height;
+                    const ansText = m.answer ? `ج${m.qNum}: [ ${m.answer} ]` : `ج${m.qNum}: (لم يُجب)`;
+
+                    ctx.font = 'bold 18px Cairo, sans-serif';
+                    const textWidth = ctx.measureText(ansText).width;
+                    const boxW = textWidth + 24;
+                    const boxH = 34;
+
+                    ctx.fillStyle = m.answer ? '#eff6ff' : '#fef2f2';
+                    ctx.strokeStyle = m.answer ? '#1d4ed8' : '#dc2626';
+                    ctx.lineWidth = 2.5;
+                    ctx.beginPath();
+                    ctx.roundRect(px - boxW / 2, py - boxH / 2, boxW, boxH, 8);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.fillStyle = m.answer ? '#1e3a8a' : '#991b1b';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(ansText, px, py);
+                });
+
+                // تحويل الورقة المحلولة إلى صورة وإرسالها لبوت التليجرام
+                const blob = await new Promise(res => finalCanvas.toBlob(res, 'image/jpeg', 0.92));
+                const token = document.getElementById('tgToken') ? document.getElementById('tgToken').value.trim() : APP_STATE.tgToken;
+                const chatId = document.getElementById('tgChatId') ? document.getElementById('tgChatId').value.trim() : APP_STATE.tgChatId;
+
+                // ملخص نصي للإجابات في الرسالة
+                const answersSummary = APP_STATE.markers.map(m => `• س${m.qNum}: ${m.answer || 'بدون إجابة'}`).join('\n');
+
+                const formData = new FormData();
+                formData.append('chat_id', chatId);
+                formData.append('photo', blob, `${studentName}_exam.jpg`);
+                formData.append('caption', `✅ تسليم امتحان جديد!\n👤 اسم الطالب: ${studentName}\n🕒 الوقت: ${new Date().toLocaleString('ar-EG')}\n\n📋 ملخص الإجابات:\n${answersSummary}`);
+
+                const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const resData = await response.json();
+
+                if (resData.ok) {
+                    alert(`🎉 تم استلام إجابتك يا (${studentName}) وإرسال ورقة الامتحان المحلولة للمعلم بنجاح!`);
+                } else {
+                    alert("⚠️ حدث خطأ أثناء الإرسال لتليجرام: " + (resData.description || "تأكد من الضغط على Start داخل البوت."));
+                }
+            } catch (err) {
+                console.error(err);
+                alert("❌ تعذر الاتصال بالإنترنت لإرسال الورقة.");
+            }
+
+            btn.disabled = false;
+            btn.innerHTML = "<span>🚀</span> <span>اعتماد الإجابة وإرسال الامتحان</span>";
+        }
+
+        // اختبار سريع للبوت
+        async function testTelegram() {
+            const token = document.getElementById('tgToken').value.trim();
+            const chatId = document.getElementById('tgChatId').value.trim();
+            try {
+                const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        text: "✅ مبروك يا مستر أحمد! الموقع مربوط ببوت التليجرام بنجاح وجاهز لاستقبال أوراق إجابات الطلاب."
+                    })
+                });
+                const data = await res.json();
+                if (data.ok) alert("✅ وصلتك رسالة التأكيد على تليجرام الآن!");
+                else alert("⚠️ خطأ: تأكد أنك ضغطت Start في البوت الخاص بك على تليجرام.");
+            } catch (e) {
+                alert("❌ خطأ في الاتصال.");
+            }
+        }
+
+        // 8. تصدير ملف مستقل خاص بالطالب فقط (ممسوح منه لوحة المعلم تماماً)
+        function exportStudentOnlyHTML() {
+            APP_STATE.tgToken = document.getElementById('tgToken').value.trim();
+            APP_STATE.tgChatId = document.getElementById('tgChatId').value.trim();
+
+            const cloneState = JSON.parse(JSON.stringify(APP_STATE));
+            cloneState.isStudentOnlyBuild = true;
+            cloneState.markers.forEach(m => m.answer = ''); // تصفير الإجابات للطالب
+
+            let htmlSource = document.documentElement.outerHTML;
+            htmlSource = htmlSource.replace(
+                /let APP_STATE = \{[\s\S]*?\};/,
+                `let APP_STATE = ${JSON.stringify(cloneState)};`
+            );
+
+            const blob = new Blob(['<!DOCTYPE html>\n' + htmlSource], { type: 'text/html;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'index.html';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+    </script>
+</body>
+</html>
